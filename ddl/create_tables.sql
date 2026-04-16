@@ -95,3 +95,16 @@ CREATE TABLE admin.control_table (
     LOAD_TIMESTAMP TIMESTAMP
 )
 USING DELTA;
+
+CREATE TABLE IF NOT EXISTS silver.station_dimension (
+    station_code STRING,
+    region STRING,
+    state STRING,
+    city STRING,
+    latitude DOUBLE,
+    longitude DOUBLE,
+    altitude DOUBLE,
+    founding_date DATE,
+    last_updated TIMESTAMP
+)
+USING DELTA;
