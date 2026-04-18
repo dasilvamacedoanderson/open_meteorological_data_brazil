@@ -10,7 +10,8 @@ from delta.tables import DeltaTable  # <-- Important: Import the DeltaTable API
 CONTROL_TABLE_NAME = "open_meteorological_data_brazil.admin.control_table"
 
 # 1. Define the years you want to ingest
-years_to_ingest = [x for x in range(2000, 2027)]
+# years_to_ingest = [x for x in range(2000, 2027)]
+years_to_ingest = [2000,2025]
 pending_records = []
 
 for year in years_to_ingest:
