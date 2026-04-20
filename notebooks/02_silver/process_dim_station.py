@@ -1,48 +1,53 @@
 # ==============================================================================
 # Script: 02_silver/process_dim_station.py
-# Purpose: Extract station metadata from the next pending CSV and update Dimensions.
+# Purpose: Extract dimensions triggered directly by File Arrival events.
 # ==============================================================================
 
 import os
+import sys
 import chardet
 from datetime import datetime
 from pyspark.sql.types import DoubleType, StructType, StructField, StringType, DateType, TimestampType
 from delta.tables import DeltaTable
 
 # 1. Configuration 
-BRONZE_CSV_VOLUME = "/Volumes/open_meteorological_data_brazil/bronze/csvfileraw/"
 CONTROL_TABLE = "open_meteorological_data_brazil.admin.control_table"
 DIMENSION_TABLE = "open_meteorological_data_brazil.silver.station_dimension"
 
-print("Checking the control table for the next pending CSV file...")
+# 2. Catch the File Path from the Databricks Job Trigger
+if len(sys.argv) < 2:
+    print("❌ Error: No file location provided by the trigger.")
+    sys.exit(1)
 
-# 2. Get EXACTLY ONE pending file from the queue
-pending_csv_df = spark.sql(f"""
-    SELECT IDFILE, FILE_NAME 
-    FROM {CONTROL_TABLE}
-    WHERE FILE_TYPE = 'CSV' 
-      AND PROCESSED_TIMESTAMP IS NULL
-    ORDER BY LOAD_TIMESTAMP ASC
-    LIMIT 1
-""")
+# The trigger passes the full path (e.g., /Volumes/.../file.CSV)
+trigger_file_path = sys.argv[1]
+file_name = os.path.basename(trigger_file_path)
 
-pending_files = pending_csv_df.collect()
+print(f"🔔 Trigger received! Processing newly arrived file: {file_name}")
 
-if not pending_files:
-    print("No pending CSV files in the queue. Dimension extraction skipping. 💤")
-    dbutils.notebook.exit("No files to process")
-
-# 3. Extract file details
-row = pending_files[0]
-id_file = row["IDFILE"]
-file_name = row["FILE_NAME"]
-local_path = os.path.join(BRONZE_CSV_VOLUME, file_name)
-
-print(f"\n🚀 Extracting Dimensions for ID {id_file}: {file_name}")
+# Convert path for native Python operations (in case Databricks passes a dbfs: prefix)
+local_path = trigger_file_path.replace("dbfs:", "") if trigger_file_path.startswith("dbfs:") else trigger_file_path
 
 if not os.path.exists(local_path):
-    print(f"⚠️ Error: File {file_name} is in the queue but missing from the volume!")
-    dbutils.notebook.exit("File missing")
+    print(f"⚠️ Error: File {file_name} triggered the job, but cannot be found at {local_path}!")
+    sys.exit(1)
+
+# 3. Retrieve the IDFILE from the Control Table
+# We still link back to the queue to maintain our data lineage
+id_lookup_df = spark.sql(f"""
+    SELECT IDFILE 
+    FROM {CONTROL_TABLE}
+    WHERE FILE_NAME = '{file_name}'
+""")
+
+id_records = id_lookup_df.collect()
+
+if not id_records:
+    print(f"⚠️ Error: {file_name} arrived, but is not registered in the control table!")
+    sys.exit(1)
+
+id_file = id_records[0]["IDFILE"]
+print(f" -> Lineage Confirmed: File is registered as Task ID {id_file}")
 
 # ==========================================
 # PHASE 1: DIMENSION EXTRACTION & UPSERT
