@@ -1,75 +1,44 @@
 # ==============================================================================
-# Script: 02_silver/process_dim_station.py
-# Purpose: Extract station metadata triggered by Job-level parameters,
-#          update the Dimension table, and prepare for Fact processing.
+# Script: 02_silver/02_process_dim_station.py
+# Purpose: Pull values from Task 1, extract metadata, update Dimension.
 # ==============================================================================
 
 import os
 import sys
-import argparse
 import chardet
 from datetime import datetime
 from pyspark.sql.types import DoubleType, StructType, StructField, StringType, DateType, TimestampType
 from delta.tables import DeltaTable
+from databricks.sdk.runtime import dbutils, spark
 
-# 1. Configuration 
-CONTROL_TABLE = "open_meteorological_data_brazil.admin.control_table"
+BRONZE_CSV_VOLUME = "/Volumes/open_meteorological_data_brazil/bronze/csvfileraw/"
 DIMENSION_TABLE = "open_meteorological_data_brazil.silver.station_dimension"
 
-# 2. Catch the Key-Value Job Parameter using argparse
-parser = argparse.ArgumentParser(description="Process INMET Station Dimensions")
-parser.add_argument('--file_path', type=str, required=False, help='Path to the arrived CSV file')
+# 1. PULL the values from the Router Task
+# Ensure "get_register_task" matches the exact name of Task 1 in the UI
+id_file = dbutils.jobs.taskValues.get(taskKey="get_register_task", key="current_id_file", default=-1)
+file_name = dbutils.jobs.taskValues.get(taskKey="get_register_task", key="current_file_name", default="")
 
-# Use parse_known_args() so Databricks internal background arguments don't crash it
-args, unknown = parser.parse_known_args()
+if id_file == -1 or not file_name:
+    print("❌ Error: Failed to receive variables from the previous task.")
+    sys.exit(1)
 
-# 3. Determine the file path (Triggered vs. Manual Testing)
-if args.file_path:
-    trigger_file_path = args.file_path
-    print("🔔 Job Parameter received from Trigger!")
-else:
-    print("⚠️ No --file_path provided. Entering Manual Testing Mode...")
-    # HARDCODE a file that actually exists in your volume for manual testing:
-    trigger_file_path = "/Volumes/open_meteorological_data_brazil/bronze/csvfileraw/2023.csv" 
-
-file_name = os.path.basename(trigger_file_path)
-print(f"🚀 Processing file: {file_name}")
-
-# Convert path for native Python operations (in case Databricks passes a dbfs: prefix)
-local_path = trigger_file_path.replace("dbfs:", "") if trigger_file_path.startswith("dbfs:") else trigger_file_path
+local_path = os.path.join(BRONZE_CSV_VOLUME, file_name)
+print(f"🚀 Dimension Task started for ID {id_file} ({file_name})")
 
 if not os.path.exists(local_path):
-    print(f"❌ Error: The file cannot be found at {local_path}!")
+    print(f"⚠️ Error: File {file_name} is in the queue but missing from the volume!")
     sys.exit(1)
-
-# 4. Retrieve the IDFILE from the Control Table
-id_lookup_df = spark.sql(f"""
-    SELECT IDFILE 
-    FROM {CONTROL_TABLE}
-    WHERE FILE_NAME = '{file_name}'
-""")
-
-id_records = id_lookup_df.collect()
-
-if not id_records:
-    print(f"❌ Error: {file_name} arrived, but is not registered in the control table!")
-    sys.exit(1)
-
-id_file = id_records[0]["IDFILE"]
-print(f" -> Lineage Confirmed: File is registered as Task ID {id_file}")
 
 # ==========================================
 # PHASE 1: DIMENSION EXTRACTION & UPSERT
 # ==========================================
-
-# Open file and detect encoding using the first 2000 bytes
 with open(local_path, 'rb') as f:
     raw_head_bytes = f.read(2000)
 
 detected_encoding = chardet.detect(raw_head_bytes)['encoding'] or "UTF-8"
 head_text = raw_head_bytes.decode(detected_encoding).split('\n')
 
-# Parse the 8 lines of INMET metadata
 station_meta = {}
 for i in range(8): 
     if len(head_text) > i and ';' in head_text[i]:
@@ -79,12 +48,10 @@ for i in range(8):
         
 station_code = station_meta.get('CODIGO (WMO)', 'UNKNOWN')
 
-# Clean Brazilian coordinate formats (comma to dot)
 lat_str = station_meta.get('LATITUDE', '').replace(',', '.')
 lon_str = station_meta.get('LONGITUDE', '').replace(',', '.')
 alt_str = station_meta.get('ALTITUDE', '').replace(',', '.')
 
-# Parse the founding date safely
 founding_date = None
 raw_date = station_meta.get('DATA DE FUNDACAO', '')
 if '/' in raw_date:
@@ -96,7 +63,6 @@ if '/' in raw_date:
         except ValueError:
             pass
 
-# Construct the single-row record
 dim_record = [{
     "station_code": station_code,
     "region": station_meta.get('REGIAO', 'UNKNOWN'),
@@ -121,10 +87,8 @@ dim_schema = StructType([
     StructField("last_updated", TimestampType(), True)
 ])
 
-# Create DataFrame
 dim_df = spark.createDataFrame(dim_record, schema=dim_schema)
 
-# MERGE into Dimension Table (Upsert)
 target_dim = DeltaTable.forName(spark, DIMENSION_TABLE)
 target_dim.alias("target").merge(
     dim_df.alias("source"),
@@ -133,5 +97,4 @@ target_dim.alias("target").merge(
 ).whenNotMatchedInsertAll(
 ).execute()
 
-print(f" -> ✅ Dimension updated successfully for Station: {station_code}")
-print(f" -> ⏭️  Passing file {file_name} to the Fact processor...")
+print(f"✅ Dimension updated for Station {station_code}. Ready for Fact processing!")
