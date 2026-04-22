@@ -16,8 +16,8 @@ DIMENSION_TABLE = "open_meteorological_data_brazil.silver.station_dimension"
 
 # 1. Catch the exact item from the Databricks For Each loop using dbutils
 try:
-    id_file = dbutils.widgets.get("id_file")
-    file_name = dbutils.widgets.get("file_name")
+    id_file = dbutils.widgets.get("id")
+    file_name = dbutils.widgets.get("file")
 except Exception as e:
     print("❌ Error: Failed to get variables from dbutils.widgets.")
     sys.exit(1)
