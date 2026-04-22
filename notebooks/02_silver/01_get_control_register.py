@@ -1,41 +1,28 @@
-# ==============================================================================
-# Script: 02_silver/01_get_control_register.py
-# Purpose: Pull next pending file from DB queue and push ID to downstream tasks.
-# ==============================================================================
-
+import json
 import sys
 from databricks.sdk.runtime import dbutils, spark
 
 CONTROL_TABLE = "open_meteorological_data_brazil.admin.control_table"
 
-print("Checking the control table for the next pending CSV file...")
+print("Scanning for pending CSV files...")
 
-# 1. Get EXACTLY ONE pending file from the queue
 pending_csv_df = spark.sql(f"""
     SELECT IDFILE, FILE_NAME 
     FROM {CONTROL_TABLE}
     WHERE FILE_TYPE = 'CSV' 
       AND PROCESSED_TIMESTAMP IS NULL
-    ORDER BY LOAD_TIMESTAMP ASC
-    LIMIT 1
 """)
 
-pending_files = pending_csv_df.collect()
+pending_files_raw = pending_csv_df.collect()
 
-if not pending_files:
-    print("No pending CSV files in the queue. Pipeline sleeping. 💤")
-    # Gracefully exit the job if the queue is empty
+if not pending_files_raw:
+    print("No pending files. 💤")
     dbutils.notebook.exit("No files to process")
 
-# 2. Extract the file details
-row = pending_files[0]
-id_file = row["IDFILE"]
-file_name = row["FILE_NAME"]
+# Create the list of dictionaries
+file_list = [{"id": row["IDFILE"], "file": row["FILE_NAME"]} for row in pending_files_raw]
 
-print(f"✅ Found pending file! Locking IDFILE: {id_file} ({file_name})")
+# Push the JSON array into the Databricks Workflow memory
+dbutils.jobs.taskValues.set(key="file_array", value=json.dumps(file_list))
 
-# 3. PUSH the values to the next step using Task Values
-dbutils.jobs.taskValues.set(key="current_id_file", value=id_file)
-dbutils.jobs.taskValues.set(key="current_file_name", value=file_name)
-
-print("🚀 Baton passed successfully to the Dimension task!")
+print(f"📦 Array of {len(file_list)} files passed to the For Each loop!")

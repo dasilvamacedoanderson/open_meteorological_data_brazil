@@ -1,6 +1,6 @@
 # ==============================================================================
 # Script: 02_silver/02_process_dim_station.py
-# Purpose: Pull values from Task 1, extract metadata, update Dimension.
+# Purpose: Extract metadata and UPSERT Dimension (Triggered by Databricks For Each loop)
 # ==============================================================================
 
 import os
@@ -14,20 +14,20 @@ from databricks.sdk.runtime import dbutils, spark
 BRONZE_CSV_VOLUME = "/Volumes/open_meteorological_data_brazil/bronze/csvfileraw/"
 DIMENSION_TABLE = "open_meteorological_data_brazil.silver.station_dimension"
 
-# 1. PULL the values from the Router Task
-# Ensure "get_register_task" matches the exact name of Task 1 in the UI
-id_file = dbutils.jobs.taskValues.get(taskKey="get_register_task", key="current_id_file", default=-1)
-file_name = dbutils.jobs.taskValues.get(taskKey="get_register_task", key="current_file_name", default="")
-
-if id_file == -1 or not file_name:
-    print("❌ Error: Failed to receive variables from the previous task.")
+# 1. Catch the exact item from the Databricks For Each loop using dbutils
+try:
+    id_file = dbutils.widgets.get("id_file")
+    file_name = dbutils.widgets.get("file_name")
+except Exception as e:
+    print("❌ Error: Failed to get variables from dbutils.widgets.")
     sys.exit(1)
 
 local_path = os.path.join(BRONZE_CSV_VOLUME, file_name)
-print(f"🚀 Dimension Task started for ID {id_file} ({file_name})")
+
+print(f"🚀 Iteration started for ID {id_file}: {file_name}")
 
 if not os.path.exists(local_path):
-    print(f"⚠️ Error: File {file_name} is in the queue but missing from the volume!")
+    print(f"❌ Error: File {file_name} missing from volume!")
     sys.exit(1)
 
 # ==========================================
@@ -46,55 +46,59 @@ for i in range(8):
         clean_key = key.replace(':', '').strip()
         station_meta[clean_key] = value.strip()
         
-station_code = station_meta.get('CODIGO (WMO)', 'UNKNOWN')
+station_code = station_meta.get('CODIGO (WMO)')
 
-lat_str = station_meta.get('LATITUDE', '').replace(',', '.')
-lon_str = station_meta.get('LONGITUDE', '').replace(',', '.')
-alt_str = station_meta.get('ALTITUDE', '').replace(',', '.')
+if station_code:
+    lat_str = station_meta.get('LATITUDE', '').replace(',', '.')
+    lon_str = station_meta.get('LONGITUDE', '').replace(',', '.')
+    alt_str = station_meta.get('ALTITUDE', '').replace(',', '.')
 
-founding_date = None
-raw_date = station_meta.get('DATA DE FUNDACAO', '')
-if '/' in raw_date:
-    try:
-        founding_date = datetime.strptime(raw_date, '%d/%m/%Y').date()
-    except ValueError:
+    founding_date = None
+    raw_date = station_meta.get('DATA DE FUNDACAO', '')
+    if '/' in raw_date:
         try:
-            founding_date = datetime.strptime(raw_date, '%d/%m/%y').date()
+            founding_date = datetime.strptime(raw_date, '%d/%m/%Y').date()
         except ValueError:
-            pass
+            try:
+                founding_date = datetime.strptime(raw_date, '%d/%m/%y').date()
+            except ValueError:
+                pass
 
-dim_record = [{
-    "station_code": station_code,
-    "region": station_meta.get('REGIAO', 'UNKNOWN'),
-    "state": station_meta.get('UF', 'UNKNOWN'),
-    "city": station_meta.get('ESTACAO', 'UNKNOWN'),
-    "latitude": float(lat_str) if lat_str.replace('.','',1).lstrip('-').isdigit() else None,
-    "longitude": float(lon_str) if lon_str.replace('.','',1).lstrip('-').isdigit() else None,
-    "altitude": float(alt_str) if alt_str.replace('.','',1).lstrip('-').isdigit() else None,
-    "founding_date": founding_date,
-    "last_updated": datetime.now()
-}]
+    dim_record = [{
+        "station_code": station_code,
+        "region": station_meta.get('REGIAO', 'UNKNOWN'),
+        "state": station_meta.get('UF', 'UNKNOWN'),
+        "city": station_meta.get('ESTACAO', 'UNKNOWN'),
+        "latitude": float(lat_str) if lat_str.replace('.','',1).lstrip('-').isdigit() else None,
+        "longitude": float(lon_str) if lon_str.replace('.','',1).lstrip('-').isdigit() else None,
+        "altitude": float(alt_str) if alt_str.replace('.','',1).lstrip('-').isdigit() else None,
+        "founding_date": founding_date,
+        "last_updated": datetime.now()
+    }]
 
-dim_schema = StructType([
-    StructField("station_code", StringType(), True),
-    StructField("region", StringType(), True),
-    StructField("state", StringType(), True),
-    StructField("city", StringType(), True),
-    StructField("latitude", DoubleType(), True),
-    StructField("longitude", DoubleType(), True),
-    StructField("altitude", DoubleType(), True),
-    StructField("founding_date", DateType(), True),
-    StructField("last_updated", TimestampType(), True)
-])
+    dim_schema = StructType([
+        StructField("station_code", StringType(), True),
+        StructField("region", StringType(), True),
+        StructField("state", StringType(), True),
+        StructField("city", StringType(), True),
+        StructField("latitude", DoubleType(), True),
+        StructField("longitude", DoubleType(), True),
+        StructField("altitude", DoubleType(), True),
+        StructField("founding_date", DateType(), True),
+        StructField("last_updated", TimestampType(), True)
+    ])
 
-dim_df = spark.createDataFrame(dim_record, schema=dim_schema)
+    dim_df = spark.createDataFrame(dim_record, schema=dim_schema)
 
-target_dim = DeltaTable.forName(spark, DIMENSION_TABLE)
-target_dim.alias("target").merge(
-    dim_df.alias("source"),
-    "target.station_code = source.station_code"
-).whenMatchedUpdateAll(
-).whenNotMatchedInsertAll(
-).execute()
+    # Execute the MERGE for this single file
+    target_dim = DeltaTable.forName(spark, DIMENSION_TABLE)
+    target_dim.alias("target").merge(
+        dim_df.alias("source"),
+        "target.station_code = source.station_code"
+    ).whenMatchedUpdateAll(
+    ).whenNotMatchedInsertAll(
+    ).execute()
 
-print(f"✅ Dimension updated for Station {station_code}. Ready for Fact processing!")
+    print(f"✅ Dimension updated for {file_name}.")
+else:
+    print(f"⚠️ Warning: No valid Station Code found in {file_name}. Skipping Dimension Upsert.")
